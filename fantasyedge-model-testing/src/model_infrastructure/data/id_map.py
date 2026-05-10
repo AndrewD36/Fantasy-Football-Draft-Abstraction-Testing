@@ -1,7 +1,10 @@
 import csv
+import re
 from pathlib import Path
 
 from model_infrastructure.data.db import connect, transaction
+
+_SUFFIX_RE = re.compile(r"\s+(jr|sr|ii|iii|iv|v)\.?$", re.IGNORECASE)
 
 OVERRIDES_PATH = Path("data/raw/manual_id_overrides.csv")
 
@@ -15,7 +18,7 @@ def load_overrides() -> dict[str, str]:
         for row in csv.DictReader(fh):
             gsis = (row.get("gsis_id") or "").strip()
             sleeper = (row.get("sleeper_player_id") or "").strip()
-            if gsis and sleeper:
+            if gsis and sleeper and sleeper != "NOT_IN_SLEEPER":
                 out[gsis] = sleeper
     return out
 
@@ -114,6 +117,7 @@ def reconcile_ids() -> dict[str, list[str]]:
 
 
 def _normalize_name(name: str) -> str:
+    name = _SUFFIX_RE.sub("", name).strip()
     return "".join(c for c in name.lower() if c.isalnum())
 
 

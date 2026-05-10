@@ -7,12 +7,19 @@ from datetime import datetime, timezone
 from model_infrastructure.data.db import connect, transaction
 
 
-def record_experiment(config: dict, headline: dict, notes: str = "") -> str:
-    """Insert a row in the experiments table. Returns the experiment_id."""
+def record_experiment(config: dict, headline: dict, results: dict | None = None,
+                      notes: str = "") -> str:
+    """Insert a row in the experiments table. Returns the experiment_id.
+
+    results: full per-agent dict from run_tournament, e.g.
+      {"adp": {"mean": 0.81, "ci_low": 0.80, "ci_high": 0.82}, ...}
+    headline: the top agent's stats (for quick queries without parsing results_json).
+    """
     eid = str(uuid.uuid4())
     git_sha = _git_sha()
     config_json = json.dumps(config, sort_keys=True, default=str)
     config_hash = hashlib.sha256(config_json.encode()).hexdigest()[:12]
+    results_json = json.dumps(results, default=float) if results is not None else None
     now = datetime.now(timezone.utc).isoformat()
     conn = connect()
     with transaction(conn):
@@ -20,8 +27,8 @@ def record_experiment(config: dict, headline: dict, notes: str = "") -> str:
             """INSERT INTO experiments
                (experiment_id, config_hash, config_json, git_sha,
                 started_at, completed_at, headline_metric,
-                metric_ci_low, metric_ci_high, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                metric_ci_low, metric_ci_high, notes, results_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 eid, config_hash, config_json, git_sha,
                 now, now,
@@ -29,6 +36,7 @@ def record_experiment(config: dict, headline: dict, notes: str = "") -> str:
                 headline.get("ci_low"),
                 headline.get("ci_high"),
                 notes,
+                results_json,
             ),
         )
     return eid

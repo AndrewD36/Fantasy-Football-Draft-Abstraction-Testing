@@ -5,10 +5,12 @@ from model_infrastructure.simulator.lineup import optimal_lineup_score
 from model_infrastructure.data.queries import load_weekly_points
 
 def stub_h2h_record(rosters: list[Roster], season: int, league: LeagueConfig,
-                    seed: int) -> list[float]:
+                    seed: int,
+                    weekly_pts: dict[tuple[str, int], float] | None = None) -> list[float]:
     """For each roster, win rate over a randomly-generated 14-week H2H schedule
     using the prior season's actual weekly points."""
-    weekly_pts = load_weekly_points(season)  # {(player_id, week): points}
+    if weekly_pts is None:
+        weekly_pts = load_weekly_points(season)
     n = league.n_teams
     weeks = league.regular_season_weeks
     schedule = generate_round_robin(n, weeks, seed)  # list of (week, home_slot, away_slot)

@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import click
@@ -18,6 +19,13 @@ from model_infrastructure.data.ingest_sleeper import ingest_adp, ingest_sleeper_
 from model_infrastructure.data.migrate import migrate as _migrate
 from model_infrastructure.data.queries import load_adp_table, load_players_from_db, load_prior_year_points
 from model_infrastructure.eval.tournament import run_tournament
+from model_infrastructure.eval.validate import (
+    check_data_sanity,
+    check_draft_invariants,
+    check_lineup_optimizer,
+    check_schedule_balance,
+    check_snake_order,
+)
 from model_infrastructure.simulator.draft import DraftSimulator
 from model_infrastructure.tracking.experiments import record_experiment
 
@@ -87,8 +95,8 @@ def demo_draft(season: int):
     adp = load_adp_table(season=season)
     prior = load_prior_year_points(season=season - 1)
     click.echo(f"  {len(players)} players loaded, {len(adp)} with ADP, {len(prior)} with prior-year points.")
-    click.echo(f"Running snake draft: {league.n_teams} teams, {league.total_rounds} rounds "
-               f"({league.total_rounds * league.n_teams} total picks)...")
+    click.echo(f"Running snake draft: {league.n_teams} teams, {league.roster.total_rounds} rounds "
+               f"({league.roster.total_rounds * league.n_teams} total picks)...")
     click.echo(f"  Agents: 4x GreedyProjection, 8x ADP (seed-varied)\n")
     agents = [
         ADPAgent(adp, seed=0),
@@ -107,7 +115,7 @@ def demo_draft(season: int):
     sim = DraftSimulator(league, players)
     rosters = sim.run(agents, seed=42)
     for slot, r in enumerate(rosters):
-        print(f"Slot {slot} ({agents[slot].name}):")
+        print(f"Team Roster {slot+1} ({agents[slot].name}):")
         for p in r.all_players():
             print(f"  {p}")
 
@@ -140,16 +148,20 @@ def tournament(agent_spec: str, n_drafts: int, base_seed: int, draft_season: int
     players = load_players_from_db(season=draft_season)
     adp = load_adp_table(season=draft_season)
     prior = load_prior_year_points(season=draft_season - 1)
-    click.echo(f"  {len(players)} players, {len(adp)} ADP entries, {len(prior)} prior-year totals.")
+    relevant = set(adp.keys()) | set(prior.keys())
+    players = [p for p in players if p.player_id in relevant]
+    click.echo(f"  {len(players)} players (filtered to those with ADP or prior-year points), "
+               f"{len(adp)} ADP entries, {len(prior)} prior-year totals.")
 
     factories = _build_factories(agents, adp=adp, prior=prior)
     click.echo(f"\nRunning {n_drafts} drafts (each draft = {league.n_teams}-team snake, "
-               f"{league.total_rounds} rounds)...")
+               f"{league.roster.total_rounds} rounds)...")
     click.echo("  Each draft slots agents randomly across teams, scores rosters using actual "
                f"{eval_season} weekly points,")
     click.echo("  then runs a round-robin H2H schedule to produce win rates.")
-    click.echo("  Bootstrap CIs computed over all drafts (B=1000 resamples).\n")
+    click.echo("  Progress reported every 10 seconds — columns are running win-rate means.\n")
 
+    t_start = time.monotonic()
     results = run_tournament(
         factories=factories,
         n_drafts=n_drafts,
@@ -158,14 +170,17 @@ def tournament(agent_spec: str, n_drafts: int, base_seed: int, draft_season: int
         eval_season=eval_season,
         n_workers=n_workers,
         base_seed=base_seed,
+        report_interval_s=10.0,
     )
+    elapsed = time.monotonic() - t_start
+    elapsed_str = f"{int(elapsed//60)}m{int(elapsed%60):02d}s" if elapsed >= 60 else f"{elapsed:.1f}s"
 
     ordered = sorted(results.items(), key=lambda kv: kv[1]["mean"], reverse=True)
-    print(f"\nTournament: {n_drafts} drafts, seed={base_seed}, "
-          f"draft_season={draft_season}, eval_season={eval_season}")
-    print(f"{'agent':<10} {'mean':>8} {'ci_low':>8} {'ci_high':>8}")
+    click.echo(f"\nTournament complete in {elapsed_str}  ({n_drafts} drafts, seed={base_seed}, "
+               f"draft_season={draft_season}, eval_season={eval_season})")
+    click.echo(f"{'agent':<10} {'mean':>8} {'ci_low':>8} {'ci_high':>8}")
     for name, r in ordered:
-        print(f"{name:<10} {r['mean']:>8.4f} {r['ci_low']:>8.4f} {r['ci_high']:>8.4f}")
+        click.echo(f"{name:<10} {r['mean']:>8.4f} {r['ci_low']:>8.4f} {r['ci_high']:>8.4f}")
 
     click.echo("  (Non-overlapping 95% CIs between agents = statistically significant ordering)\n")
     best_name, best = ordered[0]
@@ -183,9 +198,44 @@ def tournament(agent_spec: str, n_drafts: int, base_seed: int, draft_season: int
             "ci_low": best["ci_low"],
             "ci_high": best["ci_high"],
         },
+        results=results,
         notes=notes or f"top={best_name}",
     )
     print(f"\nLogged experiment {eid}")
+
+
+@main.command("validate-sim")
+@click.option("--season", default=2024, type=int,
+              help="Season used for data-sanity check against the database.")
+def validate_sim(season: int):
+    """Assert that the draft engine, lineup optimizer, and season sim are correct.
+
+    Runs five independent checks using synthetic data (no DB needed for the first
+    four) plus a DB sanity check on real weekly_stats. Any failure is a bug —
+    tournament results are meaningless until all checks pass.
+    """
+    league = LeagueConfig()
+    checks = [
+        ("Snake pick order",       lambda: check_snake_order(league)),
+        ("Draft completeness",     lambda: check_draft_invariants(league)),
+        ("Lineup optimizer",       lambda: check_lineup_optimizer(league.roster)),
+        ("H2H schedule balance",   lambda: check_schedule_balance(league)),
+        (f"Data sanity ({season})", lambda: check_data_sanity(season)),
+    ]
+
+    total_failures: list[str] = []
+    for label, fn in checks:
+        failures = fn()
+        status = "OK  " if not failures else "FAIL"
+        click.echo(f"  [{status}] {label}")
+        for msg in failures:
+            click.echo(f"         {msg}")
+        total_failures.extend(failures)
+
+    click.echo("")
+    if total_failures:
+        raise click.ClickException(f"{len(total_failures)} validation failure(s) — see above")
+    click.echo("All checks passed. Draft engine and season simulation are correct.")
 
 
 @main.command("frozen-test")
@@ -229,6 +279,8 @@ def frozen_test(scenarios: str, expected: str, tolerance: float):
         adp = load_adp_table(season=case["draft_season"])
         prior = load_prior_year_points(season=case["draft_season"] - 1)
         players = load_players_from_db(season=case["draft_season"])
+        relevant = set(adp.keys()) | set(prior.keys())
+        players = [p for p in players if p.player_id in relevant]
         factories = _build_factories(case["agents"], adp=adp, prior=prior)
         result = run_tournament(
             factories=factories,
