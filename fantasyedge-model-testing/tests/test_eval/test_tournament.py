@@ -12,7 +12,7 @@ class _RandomFactory:
 
 
 def _patch_metric(monkeypatch, league: LeagueConfig):
-    def fake_record(rosters, season, league, seed):
+    def fake_record(rosters, season, league, seed, weekly_pts=None):
         rng = np.random.default_rng(seed)
         return rng.uniform(0.0, 1.0, size=len(rosters)).tolist()
     monkeypatch.setattr(tournament, "stub_h2h_record", fake_record)

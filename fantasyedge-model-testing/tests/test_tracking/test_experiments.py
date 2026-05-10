@@ -13,7 +13,7 @@ def _setup_db(tmp_path: Path, monkeypatch) -> None:
         """CREATE TABLE experiments (
             experiment_id TEXT PRIMARY KEY, config_hash TEXT, config_json TEXT,
             git_sha TEXT, started_at TIMESTAMP, completed_at TIMESTAMP,
-            headline_metric REAL, metric_ci_low REAL, metric_ci_high REAL, notes TEXT)"""
+            headline_metric REAL, metric_ci_low REAL, metric_ci_high REAL, notes TEXT, results_json TEXT)"""
     )
     conn.commit()
     conn.close()
