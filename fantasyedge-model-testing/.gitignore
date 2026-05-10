@@ -4,8 +4,11 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+context/
 data/*.db
-data/raw/
+data/*.db-wal
+data/*.db-shm
+data/transcripts/
 *.parquet
 .DS_Store
 .env
