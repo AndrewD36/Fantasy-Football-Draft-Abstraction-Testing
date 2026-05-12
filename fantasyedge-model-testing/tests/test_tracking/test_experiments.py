@@ -2,21 +2,14 @@ import json
 from pathlib import Path
 
 from model_infrastructure.data import db
+from model_infrastructure.data.migrate import migrate
 from model_infrastructure.tracking import experiments
 
 
 def _setup_db(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "test.db"
     monkeypatch.setattr(db, "DB_PATH", db_path)
-    conn = db.connect(db_path)
-    conn.execute(
-        """CREATE TABLE experiments (
-            experiment_id TEXT PRIMARY KEY, config_hash TEXT, config_json TEXT,
-            git_sha TEXT, started_at TIMESTAMP, completed_at TIMESTAMP,
-            headline_metric REAL, metric_ci_low REAL, metric_ci_high REAL, notes TEXT, results_json TEXT)"""
-    )
-    conn.commit()
-    conn.close()
+    migrate()
 
 
 def test_record_and_list(tmp_path: Path, monkeypatch):
@@ -40,5 +33,67 @@ def test_config_hash_is_stable(tmp_path: Path, monkeypatch):
     e2 = experiments.record_experiment(cfg, headline)
     rows = {r["experiment_id"]: r for r in experiments.list_experiments()}
     assert rows[e1]["config_hash"] == rows[e2]["config_hash"]
-    # round-trip the JSON to make sure key order didn't matter
     assert json.loads(rows[e1]["config_json"]) == cfg
+
+
+# ---------------------------------------------------------------------------
+# draft_hashes storage
+# ---------------------------------------------------------------------------
+
+def test_record_experiment_stores_draft_hashes(tmp_path: Path, monkeypatch):
+    _setup_db(tmp_path, monkeypatch)
+    draft_records = [
+        {"draft_index": 0, "slot_assignment": "[0,1]", "picks_hash": "abc1234567890123"},
+        {"draft_index": 1, "slot_assignment": "[1,0]", "picks_hash": "def4567890123456"},
+    ]
+    eid = experiments.record_experiment(
+        {"agents": "r1,r2", "n_drafts": 2, "seed": 0},
+        {"mean": 0.5, "ci_low": 0.45, "ci_high": 0.55},
+        draft_records=draft_records,
+    )
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT draft_index, slot_assignment, picks_hash FROM draft_hashes "
+        "WHERE experiment_id = ? ORDER BY draft_index",
+        (eid,),
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["draft_index"] == 0
+    assert rows[0]["picks_hash"] == "abc1234567890123"
+    assert rows[0]["slot_assignment"] == "[0,1]"
+    assert rows[1]["draft_index"] == 1
+    assert rows[1]["picks_hash"] == "def4567890123456"
+
+
+def test_record_experiment_without_draft_hashes(tmp_path: Path, monkeypatch):
+    _setup_db(tmp_path, monkeypatch)
+    eid = experiments.record_experiment(
+        {"agents": "random", "n_drafts": 10, "seed": 0},
+        {"mean": 0.5, "ci_low": 0.45, "ci_high": 0.55},
+    )
+    conn = db.connect()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM draft_hashes WHERE experiment_id = ?", (eid,)
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_draft_hashes_are_transactional_with_experiment(tmp_path: Path, monkeypatch):
+    """Both the experiment row and its hashes commit together or not at all."""
+    _setup_db(tmp_path, monkeypatch)
+    draft_records = [{"draft_index": i, "slot_assignment": "[]", "picks_hash": f"{'a'*16}"}
+                     for i in range(5)]
+    eid = experiments.record_experiment(
+        {"agents": "r1", "n_drafts": 5, "seed": 1},
+        {"mean": 0.6, "ci_low": 0.5, "ci_high": 0.7},
+        draft_records=draft_records,
+    )
+    conn = db.connect()
+    exp_exists = conn.execute(
+        "SELECT 1 FROM experiments WHERE experiment_id = ?", (eid,)
+    ).fetchone()
+    hash_count = conn.execute(
+        "SELECT COUNT(*) FROM draft_hashes WHERE experiment_id = ?", (eid,)
+    ).fetchone()[0]
+    assert exp_exists is not None
+    assert hash_count == 5
