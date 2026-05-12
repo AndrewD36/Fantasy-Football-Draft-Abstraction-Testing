@@ -22,8 +22,8 @@ def fetch_sleeper_players(force: bool = False) -> dict:
     return resp.json()
 
 
-def ingest_sleeper_players() -> None:
-    data = fetch_sleeper_players()
+def ingest_sleeper_players(force: bool = False) -> None:
+    data = fetch_sleeper_players(force=force)
     rows = []
     for sleeper_id, p in data.items():
         if p.get("position") not in ("QB", "RB", "WR", "TE", "K", "DEF"):
@@ -41,15 +41,17 @@ def ingest_sleeper_players() -> None:
             "draft_year": None,
             "draft_pick": None,
             "college": p.get("college"),
+            "nfl_team": p.get("team"),  # team abbreviation (e.g. "SF"), key for DST->player_id mapping
         })
     conn = connect()
     with transaction(conn):
         conn.executemany(
             """INSERT OR REPLACE INTO players
                (player_id, sleeper_id, gsis_id, pfr_id, espn_id, yahoo_id, full_name, position,
-                birthdate, draft_year, draft_pick, college)
+                birthdate, draft_year, draft_pick, college, nfl_team)
                VALUES (:player_id, :sleeper_id, :gsis_id, :pfr_id, :espn_id, :yahoo_id,
-                       :full_name, :position, :birthdate, :draft_year, :draft_pick, :college)""",
+                       :full_name, :position, :birthdate, :draft_year, :draft_pick, :college,
+                       :nfl_team)""",
             rows,
         )
 

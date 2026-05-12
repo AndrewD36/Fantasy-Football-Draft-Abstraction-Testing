@@ -89,14 +89,20 @@ def reconcile_ids() -> dict[str, list[str]]:
     rewrites = via_gsis + via_overrides + via_name
     with transaction(conn):
         for gsis, sleeper in rewrites:
+            # OR REPLACE: if (sleeper, season, week) already exists from a prior reconcile
+            # run, delete the stale row and keep the freshly-renamed gsis row (which has
+            # the actual stat values).
             conn.execute(
-                "UPDATE weekly_stats SET player_id = ? WHERE player_id = ?", (sleeper, gsis)
+                "UPDATE OR REPLACE weekly_stats SET player_id = ? WHERE player_id = ?",
+                (sleeper, gsis),
             )
             conn.execute(
-                "UPDATE snap_counts SET player_id = ? WHERE player_id = ?", (sleeper, gsis)
+                "UPDATE OR REPLACE snap_counts SET player_id = ? WHERE player_id = ?",
+                (sleeper, gsis),
             )
             conn.execute(
-                "UPDATE player_seasons SET player_id = ? WHERE player_id = ?", (sleeper, gsis)
+                "UPDATE OR REPLACE player_seasons SET player_id = ? WHERE player_id = ?",
+                (sleeper, gsis),
             )
 
     print(
