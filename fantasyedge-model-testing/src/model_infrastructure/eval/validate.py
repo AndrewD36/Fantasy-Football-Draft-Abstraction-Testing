@@ -183,10 +183,97 @@ def check_data_sanity(season: int) -> list[str]:
         failures.append(f"Total QB PPR for {season} = {pos_totals.get('QB', 0):.0f}, expected 1000+")
     if pos_totals.get("WR", 0) < 3000:
         failures.append(f"Total WR PPR for {season} = {pos_totals.get('WR', 0):.0f}, expected 3000+")
+    if pos_totals.get("K", 0) < 100:
+        failures.append(
+            f"Total K PPR for {season} = {pos_totals.get('K', 0):.0f}, expected 100+ "
+            f"(0 means K scoring not yet ingested)"
+        )
+    if pos_totals.get("DST", 0) == 0:
+        failures.append(
+            f"Total DST PPR for {season} = 0 — run ingest-dst to populate DST weekly stats"
+        )
 
     # Best single player should score > 300 PPR points in a full season
     best = max(totals.values())
     if best < 300:
         failures.append(f"Best player season total {best:.1f} < 300 — data may be incomplete")
+
+    return failures
+
+
+def check_id_reconciliation(season: int) -> list[str]:
+    """Verify that ID reconciliation left no orphaned stats rows.
+
+    Orphaned rows are weekly_stats entries whose player_id is not in the players
+    table — they carry stats that are invisible to every tournament query.
+    Run after ingest + reconcile_ids to confirm reconciliation was complete.
+    """
+    from model_infrastructure.data.db import connect
+
+    conn = connect()
+    failures: list[str] = []
+
+    # 1. Count total orphaned rows across all seasons
+    total_orphaned = conn.execute(
+        """SELECT COUNT(*) AS n
+           FROM weekly_stats
+           WHERE player_id NOT IN (SELECT player_id FROM players)"""
+    ).fetchone()["n"]
+
+    if total_orphaned > 0:
+        failures.append(
+            f"{total_orphaned} weekly_stats rows have player_id not in players table "
+            f"(unreconciled gsis_ids — add to data/raw/manual_id_overrides.csv)"
+        )
+        # Show per-season breakdown to help triage
+        season_rows = conn.execute(
+            """SELECT season, COUNT(*) AS n
+               FROM weekly_stats
+               WHERE player_id NOT IN (SELECT player_id FROM players)
+               GROUP BY season
+               ORDER BY season"""
+        ).fetchall()
+        for r in season_rows:
+            failures.append(f"  Season {r['season']}: {r['n']} orphaned rows")
+
+        # Show first 10 unmatched IDs to help manual overrides
+        samples = conn.execute(
+            """SELECT DISTINCT player_id
+               FROM weekly_stats
+               WHERE player_id NOT IN (SELECT player_id FROM players)
+               LIMIT 10"""
+        ).fetchall()
+        failures.append("  First unmatched player_ids (likely gsis_ids):")
+        for r in samples:
+            failures.append(f"    {r['player_id']}")
+
+    # 2. Coverage: what fraction of players in the players table have stats this season?
+    total_players = conn.execute(
+        "SELECT COUNT(*) AS n FROM players WHERE position IN ('QB','RB','WR','TE','K','DST')"
+    ).fetchone()["n"]
+    players_with_stats = conn.execute(
+        """SELECT COUNT(DISTINCT ws.player_id) AS n
+           FROM weekly_stats ws
+           JOIN players p ON p.player_id = ws.player_id
+           WHERE ws.season = ?""",
+        (season,),
+    ).fetchone()["n"]
+
+    if total_players > 0:
+        coverage = players_with_stats / total_players * 100
+        if coverage < 10:
+            failures.append(
+                f"Only {players_with_stats}/{total_players} players have {season} stats "
+                f"({coverage:.1f}%) — data may not be ingested for this season"
+            )
+
+    # 3. DST-specific: ensure DST units are matched (nfl_team populated)
+    dst_no_team = conn.execute(
+        "SELECT COUNT(*) AS n FROM players WHERE position = 'DST' AND nfl_team IS NULL"
+    ).fetchone()["n"]
+    if dst_no_team > 0:
+        failures.append(
+            f"{dst_no_team} DST players have no nfl_team — re-run sleeper ingest to fix"
+        )
 
     return failures
