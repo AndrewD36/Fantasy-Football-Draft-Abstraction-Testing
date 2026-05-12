@@ -8,12 +8,14 @@ from model_infrastructure.data.db import connect, transaction
 
 
 def record_experiment(config: dict, headline: dict, results: dict | None = None,
-                      notes: str = "") -> str:
+                      notes: str = "", draft_records: list[dict] | None = None) -> str:
     """Insert a row in the experiments table. Returns the experiment_id.
 
     results: full per-agent dict from run_tournament, e.g.
       {"adp": {"mean": 0.81, "ci_low": 0.80, "ci_high": 0.82}, ...}
     headline: the top agent's stats (for quick queries without parsing results_json).
+    draft_records: list of {draft_index, slot_assignment, picks_hash} from run_tournament.
+      Stored in draft_hashes table for deterministic replay via `show-draft`.
     """
     eid = str(uuid.uuid4())
     git_sha = _git_sha()
@@ -39,6 +41,15 @@ def record_experiment(config: dict, headline: dict, results: dict | None = None,
                 results_json,
             ),
         )
+        if draft_records:
+            conn.executemany(
+                """INSERT INTO draft_hashes (experiment_id, draft_index, slot_assignment, picks_hash)
+                   VALUES (?, ?, ?, ?)""",
+                [
+                    (eid, r["draft_index"], r["slot_assignment"], r["picks_hash"])
+                    for r in draft_records
+                ],
+            )
     return eid
 
 
