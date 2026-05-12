@@ -8,6 +8,7 @@ class DraftSimulator:
     def __init__(self, league: LeagueConfig, players: list[Player]):
         self.league = league
         self.players = {p.player_id: p for p in players}
+        self._last_picks: list[Pick] = []  # populated by run(); used for hash/replay
 
     def run(self, agents: list[Agent], seed: int = 0) -> list[Roster]:
         assert len(agents) == self.league.n_teams
@@ -18,6 +19,7 @@ class DraftSimulator:
             rosters=rosters,
         )
         order = snake_pick_order(self.league.n_teams, self.league.roster.total_rounds)
+        self._last_picks = []
         for overall, team_slot in enumerate(order, start=1):
             agent = agents[team_slot]
             picked_id = agent.pick(state, team_slot)
@@ -27,6 +29,7 @@ class DraftSimulator:
             pick = Pick(overall=overall, round=(overall - 1) // self.league.n_teams + 1,
                         team_slot=team_slot, player_id=picked_id)
             state.history.append(pick)
+            self._last_picks.append(pick)
             for a in agents:
                 a.observe(state, pick)
         return rosters
