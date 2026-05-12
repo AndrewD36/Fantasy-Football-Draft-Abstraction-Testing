@@ -10,6 +10,7 @@ from model_infrastructure.agents.random_agent import RandomAgent
 from model_infrastructure.config import LeagueConfig
 from model_infrastructure.data.id_map import reconcile_ids
 from model_infrastructure.data.ingest_nflverse import (
+    ingest_dst_weekly,
     ingest_schedules,
     ingest_seasonal_rosters,
     ingest_snap_counts,
@@ -22,6 +23,7 @@ from model_infrastructure.eval.tournament import run_tournament
 from model_infrastructure.eval.validate import (
     check_data_sanity,
     check_draft_invariants,
+    check_id_reconciliation,
     check_lineup_optimizer,
     check_schedule_balance,
     check_snake_order,
@@ -47,42 +49,65 @@ def migrate():
 @click.option("--years", default="2017-2024")
 @click.option("--force", is_flag=True, help="Refetch Sleeper player dump.")
 def ingest(years: str, force: bool):
-    """Ingest NFL data, Sleeper players, schedules, snap counts, ADP, then reconcile IDs."""
+    """Ingest NFL data, Sleeper players, schedules, DST stats, ADP, then reconcile IDs."""
     start, end = (int(x) for x in years.split("-"))
     yr_list = list(range(start, end + 1))
     click.echo(f"Ingesting data for seasons {start}–{end} ({len(yr_list)} years).")
 
-    click.echo("\n[1/7] Fetching Sleeper player roster (canonical IDs, names, positions)...")
-    ingest_sleeper_players()
+    click.echo("\n[1/8] Fetching Sleeper player roster (canonical IDs, names, positions, nfl_team)...")
+    ingest_sleeper_players(force=force)
     click.echo("      Done.")
 
-    click.echo(f"\n[2/7] Importing weekly stats from nflverse for {yr_list[0]}–{yr_list[-1]}...")
+    click.echo(f"\n[2/8] Importing weekly stats from nflverse for {yr_list[0]}–{yr_list[-1]}...")
+    click.echo("      Includes K scoring (FG tiers, PAT).")
     ingest_weekly(yr_list)
     click.echo("      Done.")
 
-    click.echo(f"\n[3/7] Importing seasonal rosters (team, age, depth chart, games played)...")
+    click.echo(f"\n[3/8] Importing seasonal rosters (team, age, depth chart, games played)...")
     ingest_seasonal_rosters(yr_list)
     click.echo("      Done.")
 
-    click.echo(f"\n[4/7] Importing snap counts (offense/defense/special teams snaps per week)...")
+    click.echo(f"\n[4/8] Importing snap counts (offense/defense/special teams snaps per week)...")
     ingest_snap_counts(yr_list)
     click.echo("      Done.")
 
-    click.echo(f"\n[5/7] Importing schedules (used to derive bye weeks)...")
+    click.echo(f"\n[5/8] Importing schedules (bye weeks + game scores for DST points-allowed)...")
     ingest_schedules(yr_list)
     click.echo("      Done.")
 
-    click.echo(f"\n[6/7] Importing ADP for each season from FantasyPros CSVs...")
+    click.echo(f"\n[6/8] Importing DST weekly stats from PBP (sacks, turnovers, safeties, TDs, points allowed)...")
+    click.echo("      PBP download may take a minute per season.")
+    ingest_dst_weekly(yr_list)
+    click.echo("      Done.")
+
+    click.echo(f"\n[7/8] Importing ADP for each season from FantasyPros CSVs...")
     click.echo("      Maps player name+position to canonical Sleeper player_id.")
     for yr in yr_list:
         click.echo(f"      Season {yr}...")
         ingest_adp(season=yr)
 
-    click.echo(f"\n[7/7] Reconciling IDs (gsis_id → Sleeper player_id in weekly_stats, snap_counts, player_seasons)...")
+    click.echo(f"\n[8/8] Reconciling IDs (gsis_id → Sleeper player_id in weekly_stats, snap_counts, player_seasons)...")
     click.echo("      Resolution order: players.gsis_id → manual_id_overrides.csv → name+position heuristic.")
     reconcile_ids()
 
     click.echo("\nIngest complete.")
+
+
+@main.command("ingest-dst")
+@click.option("--years", default="2017-2024")
+def ingest_dst(years: str):
+    """Ingest team DST weekly stats (sacks, turnovers, safeties, TDs, points allowed).
+
+    Requires that `ingest` has already been run (needs players with nfl_team set
+    and schedules with home_score/away_score populated).
+    Uses nflverse play-by-play data with minimal column selection.
+    Run after `ingest` whenever you want DST fantasy points populated.
+    """
+    start, end = (int(x) for x in years.split("-"))
+    yr_list = list(range(start, end + 1))
+    click.echo(f"Ingesting DST weekly stats for {start}–{end} (PBP download may take a minute)...")
+    ingest_dst_weekly(yr_list)
+    click.echo("DST ingest complete.")
 
 
 @main.command("demo-draft")
@@ -162,7 +187,7 @@ def tournament(agent_spec: str, n_drafts: int, base_seed: int, draft_season: int
     click.echo("  Progress reported every 10 seconds — columns are running win-rate means.\n")
 
     t_start = time.monotonic()
-    results = run_tournament(
+    results, draft_records = run_tournament(
         factories=factories,
         n_drafts=n_drafts,
         league=league,
@@ -200,8 +225,9 @@ def tournament(agent_spec: str, n_drafts: int, base_seed: int, draft_season: int
         },
         results=results,
         notes=notes or f"top={best_name}",
+        draft_records=draft_records,
     )
-    print(f"\nLogged experiment {eid}")
+    print(f"\nLogged experiment {eid}  ({len(draft_records)} draft hashes stored for replay)")
 
 
 @main.command("validate-sim")
@@ -216,11 +242,12 @@ def validate_sim(season: int):
     """
     league = LeagueConfig()
     checks = [
-        ("Snake pick order",       lambda: check_snake_order(league)),
-        ("Draft completeness",     lambda: check_draft_invariants(league)),
-        ("Lineup optimizer",       lambda: check_lineup_optimizer(league.roster)),
-        ("H2H schedule balance",   lambda: check_schedule_balance(league)),
-        (f"Data sanity ({season})", lambda: check_data_sanity(season)),
+        ("Snake pick order",          lambda: check_snake_order(league)),
+        ("Draft completeness",        lambda: check_draft_invariants(league)),
+        ("Lineup optimizer",          lambda: check_lineup_optimizer(league.roster)),
+        ("H2H schedule balance",      lambda: check_schedule_balance(league)),
+        (f"Data sanity ({season})",   lambda: check_data_sanity(season)),
+        ("ID reconciliation",         lambda: check_id_reconciliation(season)),
     ]
 
     total_failures: list[str] = []
@@ -282,7 +309,7 @@ def frozen_test(scenarios: str, expected: str, tolerance: float):
         relevant = set(adp.keys()) | set(prior.keys())
         players = [p for p in players if p.player_id in relevant]
         factories = _build_factories(case["agents"], adp=adp, prior=prior)
-        result = run_tournament(
+        result, _ = run_tournament(
             factories=factories,
             n_drafts=case["n_drafts"],
             league=league,
@@ -305,6 +332,109 @@ def frozen_test(scenarios: str, expected: str, tolerance: float):
             click.echo(f"FAIL: {f}")
         raise click.ClickException(f"{len(failures)} frozen-test failure(s)")
     click.echo(f"OK: all {len(cases)} frozen scenarios passed.")
+
+
+@main.command("show-draft")
+@click.option("--experiment", "experiment_id", required=True, help="Experiment ID to replay.")
+@click.option("--draft", "draft_index", required=True, type=int, help="Draft index (0-based).")
+@click.option("--verify", is_flag=True, help="Compare replayed picks hash against stored hash.")
+def show_draft(experiment_id: str, draft_index: int, verify: bool):
+    """Replay a single draft pick-by-pick without storing transcripts.
+
+    Every draft is fully deterministic from its seed and slot assignment, so
+    we replay it on demand rather than storing per-pick rows. The optional
+    --verify flag checks that the replay hash matches the one captured during
+    the original tournament run.
+
+    Example:
+      ff-test show-draft --experiment abc123 --draft 0
+      ff-test show-draft --experiment abc123 --draft 42 --verify
+    """
+    from model_infrastructure.data.db import connect
+    from model_infrastructure.eval.tournament import picks_hash, replay_draft
+
+    conn = connect()
+
+    # Load experiment config
+    exp_row = conn.execute(
+        "SELECT config_json FROM experiments WHERE experiment_id = ?",
+        (experiment_id,),
+    ).fetchone()
+    if exp_row is None:
+        raise click.ClickException(f"Experiment {experiment_id!r} not found.")
+    config = json.loads(exp_row["config_json"])
+
+    # Load slot assignment and stored hash from draft_hashes
+    hash_row = conn.execute(
+        "SELECT slot_assignment, picks_hash FROM draft_hashes WHERE experiment_id = ? AND draft_index = ?",
+        (experiment_id, draft_index),
+    ).fetchone()
+    if hash_row is None:
+        raise click.ClickException(
+            f"No draft hash found for experiment {experiment_id!r} draft {draft_index}. "
+            f"This experiment was run before pick logging was introduced."
+        )
+    slot_assignment = json.loads(hash_row["slot_assignment"])
+    stored_hash = hash_row["picks_hash"]
+
+    draft_season = config.get("draft_season", 2024)
+    click.echo(
+        f"\nReplaying draft {draft_index} from experiment {experiment_id[:8]}  "
+        f"(agents: {config.get('agents')}, seed={config.get('seed')}, season={draft_season})"
+    )
+
+    players = load_players_from_db(season=draft_season)
+    adp = load_adp_table(season=draft_season)
+    prior = load_prior_year_points(season=draft_season - 1)
+    relevant = set(adp.keys()) | set(prior.keys())
+    players = [p for p in players if p.player_id in relevant]
+
+    agent_names = [a.strip() for a in config.get("agents", "").split(",")]
+    factories = _build_factories(agent_names, adp=adp, prior=prior)
+    fac_names = list(factories.keys())
+
+    picks = replay_draft(
+        experiment_config=config,
+        slot_assignment=slot_assignment,
+        factories=factories,
+        players=players,
+        draft_index=draft_index,
+    )
+
+    player_map = {p.player_id: p for p in players}
+
+    # Print pick table
+    click.echo(
+        f"\n{'Pick':>4}  {'Rnd':>3}  {'Slot':>4}  {'Agent':<10}  {'Player':<26}  "
+        f"{'Pos':<4}  {'ADP':>6}  {'Prior PPR':>9}"
+    )
+    click.echo("-" * 80)
+    for pk in picks:
+        player = player_map.get(pk.player_id)
+        p_name = player.name if player else pk.player_id
+        p_pos = player.position.value if player else "?"
+        p_adp = adp.get(pk.player_id)
+        p_prior = prior.get(pk.player_id)
+        agent_name = fac_names[slot_assignment[pk.team_slot]] if pk.team_slot < len(slot_assignment) else "?"
+        click.echo(
+            f"{pk.overall:>4}  {pk.round:>3}  {pk.team_slot:>4}  {agent_name:<10}  "
+            f"{p_name:<26}  {p_pos:<4}  "
+            f"{'—' if p_adp is None else f'{p_adp:>6.1f}'}  "
+            f"{'—' if p_prior is None else f'{p_prior:>9.1f}'}"
+        )
+
+    # Verification
+    if verify:
+        replayed_hash = picks_hash(picks)
+        match = replayed_hash == stored_hash
+        symbol = "✓" if match else "✗"
+        click.echo(
+            f"\n[Verify] Replayed hash: {replayed_hash}  |  Stored hash: {stored_hash}  {symbol}"
+        )
+        if not match:
+            raise click.ClickException(
+                "Hash mismatch — RNG or data changed since this experiment was run."
+            )
 
 
 def _build_factories(names: list[str], *, adp: dict[str, float],

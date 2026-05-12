@@ -22,7 +22,17 @@ class ScoringRules(BaseModel):
     rec_td: float = 6.0
     fumble_lost: float = -2.0
     two_pt: float = 2.0
-    # K and DST scoring left as defaults; refine when needed
+    # Kicker
+    pat_made: float = 1.0
+    fg_0_39: float = 3.0
+    fg_40_49: float = 4.0
+    fg_50_plus: float = 5.0
+    # DST
+    dst_sack: float = 1.0
+    dst_int: float = 2.0
+    dst_fumble_rec: float = 2.0
+    dst_safety: float = 2.0
+    dst_td: float = 6.0
 
     def points_for(self, line: dict[str, float]) -> float:
         return (
@@ -35,7 +45,38 @@ class ScoringRules(BaseModel):
           + self.rec_yd    * line.get("rec_yards", 0)
           + self.rec_td    * line.get("rec_tds", 0)
           + self.fumble_lost * line.get("fumbles_lost", 0)
+          # Kicker
+          + self.pat_made  * line.get("pat_made", 0)
+          + self.fg_0_39   * line.get("fg_made_0_39", 0)
+          + self.fg_40_49  * line.get("fg_made_40_49", 0)
+          + self.fg_50_plus * line.get("fg_made_50_plus", 0)
+          # DST
+          + self.dst_sack      * line.get("dst_sacks", 0)
+          + self.dst_int       * line.get("dst_int", 0)
+          + self.dst_fumble_rec * line.get("dst_fumble_rec", 0)
+          + self.dst_safety    * line.get("dst_safety", 0)
+          + self.dst_td        * line.get("dst_td", 0)
+          + self.dst_points_allowed_bonus(int(line.get("dst_points_allowed", -1)))
         )
+
+    @staticmethod
+    def dst_points_allowed_bonus(pts: int) -> float:
+        """Tiered bonus/penalty for DST points allowed. -1 means no data (no bonus)."""
+        if pts < 0:
+            return 0.0
+        if pts == 0:
+            return 10.0
+        if pts <= 6:
+            return 7.0
+        if pts <= 13:
+            return 4.0
+        if pts <= 20:
+            return 1.0
+        if pts <= 27:
+            return 0.0
+        if pts <= 34:
+            return -1.0
+        return -4.0
 
 class RosterConfig(BaseModel):
     qb: int = 1
